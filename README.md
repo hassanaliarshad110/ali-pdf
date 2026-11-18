@@ -18,6 +18,24 @@ Ali PDF covers the everyday work people usually pay a monthly subscription for:
 | **Convert** | PDF to Word, Excel (.csv), JPG, PNG, text and HTML; images to PDF |
 | **Optimize & protect** | Compress, remove a password, flatten, edit properties |
 
+## Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| **← / →** | Previous / next page |
+| **Home / End** | First / last page |
+| **Page Up / Page Down / Space** | Scroll one screen |
+| **Ctrl + Shift + → / ←** | Rotate page right / left |
+| **Ctrl + 0 / 1 / 2** | Fit page / actual size / fit width |
+| **Ctrl + Plus / Minus** | Zoom in / out |
+| **Ctrl + F**, **F3** | Find, next result |
+| **Ctrl + Shift + N** | Go to page |
+| **Ctrl + P / S / O** | Print / save / open |
+| **Ctrl + Z / Y** | Undo / redo |
+| **Ctrl + Shift + D** | Delete page |
+| **Ctrl + D** | Document properties |
+| **F4** | Show or hide the side panel |
+
 ## Private by design
 
 Your files never leave your device. Everything happens inside your browser. Nothing is uploaded to a server.

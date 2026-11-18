@@ -293,7 +293,7 @@ textarea.ed{position:absolute;z-index:5;border:1.5px dashed var(--acc);backgroun
       <button class="ib" id="zFit" title="Fit page"></button>
       <div class="sep" style="height:22px"></div>
       <button class="ib" id="pPrev" title="Previous page"></button>
-      <input id="pgIn" value="1"> <span id="pgN" style="color:var(--mut);padding:0 4px">/ 1</span>
+      <input id="pgIn" value="1"> <span id="pgN" style="color:var(--mut);padding:0 4px;white-space:nowrap">/ 1</span>
       <button class="ib" id="pNext" title="Next page"></button>
     </div>
   </main>
@@ -481,6 +481,138 @@ const TE = new Map(); // page id -> thumb info
 const pageById = id => S.pages.find(p => p.id === id);
 const srcOf = p => S.sources.get(p.src);
 
+/* ---- unlock password-protected PDFs (standard security: RC4 40/128, AES-128, AES-256) ---- */
+const md5 = (() => {
+  const K = new Int32Array(64), R = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+  for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+  return data => {
+    const n = data.length, len = ((n + 8) >> 6 << 6) + 64, b = new Uint8Array(len); b.set(data); b[n] = 0x80;
+    const dv = new DataView(b.buffer); dv.setUint32(len - 8, (n << 3) >>> 0, true); dv.setUint32(len - 4, Math.floor(n / 536870912), true);
+    let a0 = 0x67452301, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476; const M = new Int32Array(16);
+    for (let o = 0; o < len; o += 64) {
+      for (let i = 0; i < 16; i++) M[i] = dv.getInt32(o + i * 4, true);
+      let A = a0, B = b0, C = c0, D = d0;
+      for (let i = 0; i < 64; i++) {
+        let F, g; const r = i >> 4;
+        if (r === 0) { F = (B & C) | (~B & D); g = i; } else if (r === 1) { F = (D & B) | (~D & C); g = (5 * i + 1) & 15; } else if (r === 2) { F = B ^ C ^ D; g = (3 * i + 5) & 15; } else { F = C ^ (B | ~D); g = (7 * i) & 15; }
+        const t = (A + F + K[i] + M[g]) | 0, s = R[r * 4 + (i & 3)]; A = D; D = C; C = B; B = (B + ((t << s) | (t >>> (32 - s)))) | 0;
+      }
+      a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+    }
+    const out = new Uint8Array(16), ov = new DataView(out.buffer); ov.setInt32(0, a0, true); ov.setInt32(4, b0, true); ov.setInt32(8, c0, true); ov.setInt32(12, d0, true); return out;
+  };
+})();
+function rc4(key, data) {
+  const s = new Uint8Array(256); for (let i = 0; i < 256; i++) s[i] = i;
+  for (let i = 0, j = 0; i < 256; i++) { j = (j + s[i] + key[i % key.length]) & 255; const t = s[i]; s[i] = s[j]; s[j] = t; }
+  const out = new Uint8Array(data.length);
+  for (let k = 0, i = 0, j = 0; k < data.length; k++) { i = (i + 1) & 255; j = (j + s[i]) & 255; const t = s[i]; s[i] = s[j]; s[j] = t; out[k] = data[k] ^ s[(s[i] + s[j]) & 255]; }
+  return out;
+}
+const cat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
+const eqBytes = (a, b, n) => { for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false; return true; };
+const aesKey = (k, use) => crypto.subtle.importKey('raw', k, 'AES-CBC', false, use);
+async function aesEncNoPad(k, iv, data) { return new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, await aesKey(k, ['encrypt']), data)).subarray(0, data.length); }
+async function aesDecNoPad(k, iv, data) {
+  const pad = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv: data.subarray(data.length - 16) }, await aesKey(k, ['encrypt']), new Uint8Array(0)));
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, await aesKey(k, ['decrypt']), cat(data, pad))).subarray(0, data.length);
+}
+async function aesDecData(k, data) {   // PDF layout: 16-byte IV, then CBC data with padding
+  const n = (data.length - 16) & ~15; if (n <= 0) return new Uint8Array(0);
+  const iv = data.subarray(0, 16), ct = data.subarray(16, 16 + n);
+  try { return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, await aesKey(k, ['decrypt']), ct)); } catch { return aesDecNoPad(k, iv, ct); }
+}
+const sha = async (bits, d) => new Uint8Array(await crypto.subtle.digest('SHA-' + bits, d));
+async function hashR6(pw, salt, udata, r6) {
+  let k = await sha(256, cat(pw, salt, udata)); if (!r6) return k;
+  for (let i = 0, e = [0]; i < 64 || e[e.length - 1] > i - 32; i++) {
+    const one = cat(pw, k, udata), k1 = new Uint8Array(one.length * 64); for (let j = 0; j < 64; j++) k1.set(one, j * one.length);
+    e = await aesEncNoPad(k.subarray(0, 16), k.subarray(16, 32), k1);
+    let m = 0; for (let j = 0; j < 16; j++) m += e[j];
+    k = await sha([256, 384, 512][m % 3], e);
+  }
+  return k.subarray(0, 32);
+}
+const PWPAD = new Uint8Array([0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A]);
+async function pdfFileKey(e, pw) {
+  if (e.R >= 5) {
+    const p = new TextEncoder().encode(pw).subarray(0, 127), r6 = e.R >= 6, U = e.U, O = e.O, none = new Uint8Array(0), iv = new Uint8Array(16);
+    if (eqBytes(await hashR6(p, U.subarray(32, 40), none, r6), U, 32)) return aesDecNoPad(await hashR6(p, U.subarray(40, 48), none, r6), iv, e.UE.subarray(0, 32));
+    const u48 = U.subarray(0, 48);
+    if (eqBytes(await hashR6(p, O.subarray(32, 40), u48, r6), O, 32)) return aesDecNoPad(await hashR6(p, O.subarray(40, 48), u48, r6), iv, e.OE.subarray(0, 32));
+    return null;
+  }
+  const n = e.R === 2 ? 5 : e.n, pad = s => cat(Uint8Array.from(s, c => c.charCodeAt(0) & 255), PWPAD).subarray(0, 32);
+  const P = new Uint8Array(4); new DataView(P.buffer).setInt32(0, e.P | 0, true);
+  const keyFor = p32 => { let h = md5(cat(p32, e.O.subarray(0, 32), P, e.id, e.R >= 4 && !e.encMeta ? new Uint8Array([255, 255, 255, 255]) : new Uint8Array(0))); if (e.R >= 3) for (let i = 0; i < 50; i++) h = md5(h.subarray(0, n)); return h.subarray(0, n); };
+  const okUser = k => { if (e.R === 2) return eqBytes(rc4(k, PWPAD), e.U, 32); let x = rc4(k, md5(cat(PWPAD, e.id))); for (let i = 1; i <= 19; i++) x = rc4(k.map(b => b ^ i), x); return eqBytes(x, e.U, 16); };
+  let k = keyFor(pad(pw)); if (okUser(k)) return k;
+  let ok = md5(pad(pw)); if (e.R >= 3) for (let i = 0; i < 50; i++) ok = md5(ok); ok = ok.subarray(0, n);
+  let up = e.O.subarray(0, 32); if (e.R === 2) up = rc4(ok, up); else for (let i = 19; i >= 0; i--) up = rc4(ok.map(b => b ^ i), up);
+  k = keyFor(up); return okUser(k) ? k : null;
+}
+// Returns the unlocked PDF bytes, null if the file is not encrypted, or throws if it cannot be unlocked.
+async function decryptPdf(bytes, pw) {
+  const N = PL.PDFName.of, proto = PL.PDFParser.prototype, hdr = proto.parseIndirectObjectHeader, mk = PL.PDFObjectStreamParser.forStream;
+  let last = null; const packed = []; let ctx;
+  proto.parseIndirectObjectHeader = function () { return (last = hdr.call(this)); };
+  PL.PDFObjectStreamParser.forStream = stream => { packed.push({ ref: last, stream }); return { parseIntoContext: async () => { } }; };
+  try { ctx = await PL.PDFParser.forBytesWithOptions(bytes, Infinity, false, false).parseDocument(); }
+  finally { proto.parseIndirectObjectHeader = hdr; PL.PDFObjectStreamParser.forStream = mk; }
+  const encRef = ctx.trailerInfo.Encrypt; if (!encRef) return null;
+  const enc = ctx.lookup(encRef); if (!(enc instanceof PL.PDFDict) || enc.get(N('Filter')) !== N('Standard')) throw new Error('unsupported protection');
+  const num = (k, d) => { const v = enc.lookup(N(k)); return v instanceof PL.PDFNumber ? v.asNumber() : d; }, str = k => { const v = enc.lookup(N(k)); return v && v.asBytes ? v.asBytes() : new Uint8Array(0); };
+  const ids = ctx.trailerInfo.ID instanceof PL.PDFRef ? ctx.lookup(ctx.trailerInfo.ID) : ctx.trailerInfo.ID, id0 = ids instanceof PL.PDFArray && ids.size() ? ids.lookup(0) : null;
+  const V = num('V', 0), em = enc.lookup(N('EncryptMetadata'));
+  const e = { R: num('R', 2), n: Math.min(16, Math.max(5, num('Length', 40) >> 3)), P: num('P', 0), O: str('O'), U: str('U'), OE: str('OE'), UE: str('UE'), id: id0 && id0.asBytes ? id0.asBytes() : new Uint8Array(0), encMeta: !(em === PL.PDFBool.False) };
+  const method = which => {
+    if (V < 4) return 'RC4';
+    const nm = enc.lookup(N(which)), cf = enc.lookup(N('CF')), f = nm && cf instanceof PL.PDFDict ? cf.lookup(nm) : null, m = f instanceof PL.PDFDict ? f.lookup(N('CFM')) : null;
+    if (f instanceof PL.PDFDict && V === 4) { const L = f.lookup(N('Length')); if (L instanceof PL.PDFNumber) e.n = Math.min(16, Math.max(5, L.asNumber() > 40 ? L.asNumber() >> 3 : L.asNumber())); }
+    return m === N('AESV2') ? 'AES' : m === N('AESV3') ? 'AES256' : m === N('V2') ? 'RC4' : 'NONE';
+  };
+  const stmM = method('StmF'), strM = method('StrF');
+  if (V === 4 && (stmM === 'AES' || strM === 'AES')) e.n = 16;
+  let key = await pdfFileKey(e, ''); if (!key && pw) key = await pdfFileKey(e, pw); if (!key) throw new Error('wrong password');
+  const dec = async (m, ref, data) => {
+    if (m === 'NONE' || !data.length) return data; if (m === 'AES256') return aesDecData(key, data);
+    const x = new Uint8Array([ref.objectNumber & 255, (ref.objectNumber >> 8) & 255, (ref.objectNumber >> 16) & 255, ref.generationNumber & 255, (ref.generationNumber >> 8) & 255]);
+    const k = md5(cat(key, x, m === 'AES' ? new Uint8Array([0x73, 0x41, 0x6C, 0x54]) : new Uint8Array(0))).subarray(0, Math.min(16, key.length + 5));
+    return m === 'AES' ? aesDecData(k, data) : rc4(k, data);
+  };
+  const hex = b => { let s = ''; for (let i = 0; i < b.length; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16); return PL.PDFHexString.of(s); };
+  const isStr = v => v instanceof PL.PDFString || v instanceof PL.PDFHexString;
+  const walk = async (ref, o) => {
+    if (o instanceof PL.PDFDict) { for (const [k, v] of o.entries()) { if (isStr(v)) o.set(k, hex(await dec(strM, ref, v.asBytes()))); else await walk(ref, v); } }
+    else if (o instanceof PL.PDFArray) { for (let i = 0; i < o.size(); i++) { const v = o.get(i); if (isStr(v)) o.set(i, hex(await dec(strM, ref, v.asBytes()))); else await walk(ref, v); } }
+  };
+  const direct = ctx.enumerateIndirectObjects().filter(([r]) => r !== encRef);
+  for (const { ref, stream } of packed) {
+    const plain = PL.PDFRawStream.of(stream.dict, await dec(stmM, ref, stream.contents));
+    await mk.call(PL.PDFObjectStreamParser, plain, () => false).parseIntoContext();
+  }
+  for (const [ref, o] of direct) {
+    if (o instanceof PL.PDFRawStream) {
+      await walk(ref, o.dict);
+      const flt = o.dict.lookup(N('Filter')), crypt = flt === N('Crypt') || (flt instanceof PL.PDFArray && flt.asArray().includes(N('Crypt')));
+      if (!crypt && !(o.dict.lookup(N('Type')) === N('Metadata') && !e.encMeta)) o.contents = await dec(stmM, ref, o.contents);
+    } else if (isStr(o)) ctx.assign(ref, hex(await dec(strM, ref, o.asBytes())));
+    else await walk(ref, o);
+  }
+  delete ctx.trailerInfo.Encrypt; ctx.delete(encRef);
+  return await PL.PDFWriter.forContext(ctx, Infinity).serializeToBuffer();
+}
+function looksEncrypted(b) { const t = [47, 69, 110, 99, 114, 121, 112, 116]; for (let i = b.indexOf(47); i >= 0; i = b.indexOf(47, i + 1)) { let k = 1; while (k < 8 && b[i + k] === t[k]) k++; if (k === 8) return true; } return false; }
+async function sameDoc(a, b) {
+  if (a.numPages !== b.numPages) return false;
+  for (let i = 1; i <= Math.min(3, a.numPages); i++) {
+    const [pa, pb] = [await a.getPage(i), await b.getPage(i)], txt = async pg => (await pg.getTextContent()).items.map(it => it.str).join('');
+    if (await txt(pa) !== await txt(pb)) return false;
+    if ((await pa.getOperatorList()).fnArray.length !== (await pb.getOperatorList()).fnArray.length) return false;
+  }
+  return true;
+}
+
 /* ============================== PDF loading ============================== */
 function openPdfjs(bytes, name, knownPw) {
   return new Promise((resolve, reject) => {
@@ -495,8 +627,15 @@ function openPdfjs(bytes, name, knownPw) {
   });
 }
 async function addSource(bytes, name) {
-  const { doc, pw } = await openPdfjs(bytes, name);
-  const src = { id: uid(), name, bytes, doc, pw, proxies: [], text: [], ver: 1, encrypted: !!pw, libFail: false, fields: [] };
+  let { doc, pw } = await openPdfjs(bytes, name), wasLocked = false;
+  if (looksEncrypted(bytes)) {
+    // unlock properly so the saved copy keeps real, selectable text; if anything looks off, fall back to page images
+    try {
+      const plain = await decryptPdf(bytes, pw);
+      if (plain) { const d2 = await pdfjsLib.getDocument({ ...PDFOPTS, data: plain.slice(0), isEvalSupported: false }).promise; if (await sameDoc(doc, d2)) { try { doc.destroy(); } catch { } doc = d2; bytes = plain; pw = ''; wasLocked = true; } else d2.destroy(); }
+    } catch (e) { console.warn('unlock failed', e); }
+  }
+  const src = { id: uid(), name, bytes, doc, pw, proxies: [], text: [], ver: 1, encrypted: !!pw, wasLocked, libFail: false, fields: [] };
   try {
     const d = await PL.PDFDocument.load(bytes, { updateMetadata: false });
     readFields(src, d);
@@ -1303,6 +1442,8 @@ document.addEventListener('keydown', e => {
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); savePdf(); return; }
   if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); $('#fOpen').click(); return; }
   if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); openSearch(); return; }
+  if (mod && e.key.toLowerCase() === 'p') { e.preventDefault(); printPdf(); return; }
+  if (e.key === 'F3' || (mod && e.key.toLowerCase() === 'g')) { e.preventDefault(); if (S.hits.length) stepHit(e.shiftKey ? -1 : 1); else openSearch(); return; }
   if (typing || document.querySelector('.mb')) return;
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
@@ -1317,27 +1458,60 @@ document.addEventListener('keydown', e => {
     e.preventDefault(); const st = e.shiftKey ? 10 : 1; const pe = PE.get(sa.p.id); const m = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];
     const [dx, dy] = pdfDelta(pe.vp, 0, 0, m[0] * pe.vp.scale, m[1] * pe.vp.scale); if (propSnapFor !== sa.a.id + 'mv') { snap(); propSnapFor = sa.a.id + 'mv'; } translateA(sa.a, dx, dy); refreshPage(sa.p); return;
   }
-  if (!sa && (e.key === 'ArrowRight' || e.key === 'PageDown') && viewer.scrollHeight <= viewer.clientHeight + 4) gotoPage(S.cur + 1);
+  if (S.pages.length && !e.altKey) {
+    const k = e.key, go = fn => { e.preventDefault(); fn(); };
+    // same shortcuts people know from Adobe Reader
+    if (mod && e.shiftKey && (k === 'ArrowRight' || k === 'ArrowLeft')) return go(() => rotatePages(k === 'ArrowRight' ? 90 : -90));
+    if (mod && e.shiftKey && k.toLowerCase() === 'n') return go(() => { $('#pgIn').focus(); $('#pgIn').select(); });
+    if (mod && e.shiftKey && k.toLowerCase() === 'd') return go(() => deletePages());
+    if (mod && !e.shiftKey && k === '0') return go(() => fitPage());
+    if (mod && !e.shiftKey && k === '1') return go(() => setZoom(1, null, true));
+    if (mod && !e.shiftKey && k === '2') return go(() => fitWidth());
+    if (mod && !e.shiftKey && k.toLowerCase() === 'd') return go(() => openSideTab('info'));
+    if (k === 'Home' || (mod && k === 'ArrowUp')) return go(() => gotoPage(0));
+    if (k === 'End' || (mod && k === 'ArrowDown')) return go(() => gotoPage(S.pages.length - 1));
+    if (!mod && (k === 'ArrowRight' || k === 'ArrowLeft')) return go(() => gotoPage(S.cur + (k === 'ArrowRight' ? 1 : -1)));
+    if (!mod && (k === 'ArrowDown' || k === 'ArrowUp')) return go(() => viewer.scrollBy({ top: k === 'ArrowDown' ? 60 : -60 }));
+    if (!mod && (k === 'PageDown' || k === 'PageUp' || (k === ' ' && tag !== 'button'))) return go(() => viewer.scrollBy({ top: (k === 'PageUp' || (k === ' ' && e.shiftKey) ? -1 : 1) * viewer.clientHeight * 0.9 }));
+    if (k === 'F4') return go(() => toggleSide());
+  }
   const keys = { v: 'select', e: 'edittext', t: 'text', h: 'highlight', p: 'pen', r: 'rect', o: 'ellipse', l: 'line', a: 'arrow', w: 'whiteout', x: 'redact', n: 'note' };
   if (!mod && !e.altKey && keys[e.key.toLowerCase()] && S.pages.length) setTool(keys[e.key.toLowerCase()]);
 });
 
 /* ============================== search ============================== */
 let searchTimer = 0;
-$('#q').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
-$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); stepHit(e.shiftKey ? -1 : 1); } if (e.key === 'Escape') { $('#q').value = ''; runSearch(); $('#q').blur(); } });
+$('#q').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { searchTimer = 0; runSearch(); }, 250); });
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (searchTimer) { searchTimer = 0; runSearch(); } else stepHit(e.shiftKey ? -1 : 1); } if (e.key === 'Escape') { $('#q').value = ''; runSearch(); $('#q').blur(); } });
+let searchRun = 0, noTextFor = null;
 async function runSearch() {
-  const q = $('#q').value.trim().toLowerCase(); S.hits = []; S.hitIdx = -1;
+  clearTimeout(searchTimer); searchTimer = 0; const run = ++searchRun;
+  const q = $('#q').value.trim().toLowerCase().replace(/\s+/g, ' '); const hits = []; let anyText = false;
   if (q.length >= 1 && S.pages.length) {
     for (const p of S.pages) {
-      const items = await textItems(p);
-      for (const it of items) {
-        const s = it.str.toLowerCase(); let k = s.indexOf(q);
-        while (k >= 0) { const cw = it.w / Math.max(1, it.str.length); const b = itemBox(it); S.hits.push({ pid: p.id, x: it.x + cw * k, y: b.y, w: Math.max(2, cw * q.length), h: b.h }); k = s.indexOf(q, k + q.length); }
+      const items = await textItems(p); if (run !== searchRun) return; if (items.length) anyText = true;
+      // match across the whole line, so a phrase is found even when the PDF stores each word separately
+      for (const L of linesOf(items)) {
+        let str = '', lastEnd = null; const segs = [];
+        for (const it of L.items) {
+          if (lastEnd != null && it.x - lastEnd > L.h * 0.18 && !/\s$/.test(str) && !/^\s/.test(it.str)) str += ' ';
+          segs.push({ a: str.length, it }); str += it.str; lastEnd = it.x + it.w;
+        }
+        const low = str.toLowerCase().replace(/\s/g, ' '); let k = low.indexOf(q);
+        while (k >= 0) {
+          let x0 = Infinity, x1 = -Infinity, bx = null;
+          for (const sg of segs) {
+            const n = sg.it.str.length, from = Math.max(k, sg.a), to = Math.min(k + q.length, sg.a + n); if (to <= from) continue;
+            const cw = sg.it.w / Math.max(1, n); x0 = Math.min(x0, sg.it.x + cw * (from - sg.a)); x1 = Math.max(x1, sg.it.x + cw * (to - sg.a)); bx = bx || itemBox(sg.it);
+          }
+          if (bx) hits.push({ pid: p.id, x: x0, y: bx.y, w: Math.max(2, x1 - x0), h: bx.h });
+          k = low.indexOf(q, k + q.length);
+        }
       }
     }
-    if (S.hits.length) S.hitIdx = 0;
   }
+  S.hits = hits; S.hitIdx = hits.length ? 0 : -1;
+  if (q && S.pages.length && !anyText && noTextFor !== S.pages[0].src) { noTextFor = S.pages[0].src; toast('This PDF is a scan (pictures of pages), so there is no text to search', '', 5000); }
   $('#qCnt').textContent = q ? (S.hits.length ? `${S.hitIdx + 1}/${S.hits.length}` : '0') : '';
   S.pages.forEach(p => drawOverlay(p)); if (S.hits.length) showHit();
 }
@@ -1437,6 +1611,44 @@ async function rasterPage(proxy, p, dpi, q, burn) {
   if (burn) { x.fillStyle = '#000'; for (const a of p.annots) if (a.type === 'redact') { const [p1, p2] = [vp.convertToViewportPoint(a.x, a.y), vp.convertToViewportPoint(a.x + a.w, a.y + a.h)]; x.fillRect(Math.min(p1[0], p2[0]), Math.min(p1[1], p2[1]), Math.abs(p2[0] - p1[0]), Math.abs(p2[1] - p1[1])); } }
   const blob = await canvasBlob(c, 'image/jpeg', q); return new Uint8Array(await blob.arrayBuffer());
 }
+// Copies the wanted pages of one source in a single pass, so shared fonts and images are stored once (not once per page).
+// Links and bookmarks that point at a kept page follow it to its copy; pages that are not kept (deleted, redacted) are
+// never pulled into the output through such references.
+async function copySource(out, src, need) {
+  const doc = await PL.PDFDocument.load(src.bytes, { ignoreEncryption: true, updateMetadata: false }); await doc.flush();
+  const copier = PL.PDFObjectCopier.for(doc.context, out.context), sp = doc.getPages(), want = new Set(need.map(q => q.idx)), first = new Map();
+  sp.forEach((pg, i) => { if (want.has(i)) { const r = out.context.nextRef(); first.set(i, r); copier.traversedObjects.set(pg.ref, r); } else copier.traversedObjects.set(pg.ref, PL.PDFNull); });
+  const copies = new Map();
+  for (const q of need) {
+    const node = copier.copy(sp[q.idx].node); let ref = first.get(q.idx);
+    if (ref) { first.delete(q.idx); out.context.assign(ref, node); } else ref = out.context.register(node);
+    copies.set(q, PL.PDFPage.of(node, ref, out));
+  }
+  return { doc, copier, copies };
+}
+// Keeps fillable form fields and bookmarks, which a page-by-page copy would otherwise drop.
+function carryOver(out, loaded) {
+  const c = out.context, N = PL.PDFName.of, roots = new Set();
+  for (const pg of out.getPages()) {
+    const an = pg.node.Annots(); if (!an) continue;
+    for (let i = 0; i < an.size(); i++) {
+      let ref = an.get(i), d = c.lookup(ref); if (!(d instanceof PL.PDFDict) || d.get(N('Subtype')) !== N('Widget')) continue;
+      for (let g = 0; g < 50 && d.get(N('Parent')) instanceof PL.PDFRef; g++) { const up = c.lookup(d.get(N('Parent'))); if (!(up instanceof PL.PDFDict)) break; ref = d.get(N('Parent')); d = up; }
+      if (ref instanceof PL.PDFRef) roots.add(ref);
+    }
+  }
+  const srcs = [...loaded.values()];
+  if (roots.size) {
+    const af = c.obj({ Fields: [...roots] });
+    for (const s of srcs) { const o = s.doc.catalog.lookup(N('AcroForm')); if (!(o instanceof PL.PDFDict)) continue; for (const k of ['DA', 'DR', 'Q', 'NeedAppearances']) if (o.get(N(k)) && !af.get(N(k))) af.set(N(k), s.copier.copy(o.get(N(k)))); }
+    out.catalog.set(N('AcroForm'), c.register(af));
+  }
+  if (srcs.length === 1) {
+    const { doc, copier } = srcs[0], cat = doc.catalog;
+    for (const k of ['Outlines', 'Dests']) if (cat.get(N(k))) out.catalog.set(N(k), copier.copy(cat.get(N(k))));
+    const names = cat.lookup(N('Names')); if (names instanceof PL.PDFDict && names.get(N('Dests'))) out.catalog.set(N('Names'), c.obj({ Dests: copier.copy(names.get(N('Dests'))) }));
+  }
+}
 async function buildPdf(pages = S.pages, { rasterize = false, dpi = 150, quality = 0.82, label = 'Building PDF' } = {}) {
   const out = await PL.PDFDocument.create(); const ctx = { out, fonts: {}, imgs: {} }; const loaded = new Map();
   for (let i = 0; i < pages.length; i++) {
@@ -1449,14 +1661,16 @@ async function buildPdf(pages = S.pages, { rasterize = false, dpi = 150, quality
       const jpg = await out.embedJpg(await rasterPage(proxy, p, rasterize ? dpi : Math.max(dpi, 200), rasterize ? quality : 0.9, true));
       page = out.addPage([w, h]); page.setMediaBox(v[0], v[1], w, h); page.drawImage(jpg, { x: v[0], y: v[1], width: w, height: h });
     } else {
-      let d = loaded.get(p.src); if (!d) { d = await PL.PDFDocument.load(src.bytes, { ignoreEncryption: true, updateMetadata: false }); loaded.set(p.src, d); }
-      const [cp] = await out.copyPages(d, [p.idx]); page = out.addPage(cp);
+      let d = loaded.get(p.src);
+      if (!d) { d = await copySource(out, src, pages.filter(q => q.src === p.src && !(rasterize || src.encrypted || src.libFail || q.annots.some(a => a.type === 'redact')))); loaded.set(p.src, d); }
+      page = out.addPage(d.copies.get(p));
       if (p.crop) page.setCropBox(p.crop[0], p.crop[1], p.crop[2] - p.crop[0], p.crop[3] - p.crop[1]);
     }
     page.setRotation(PL.degrees(total));
     await drawAnnots(ctx, page, p);
     await drawFx(ctx, page, p, S.pages.indexOf(p) >= 0 ? S.pages.indexOf(p) : i, proxy);
   }
+  try { carryOver(out, loaded); } catch (e) { console.warn(e); }
   const m = S.meta; if (m.title) out.setTitle(m.title); if (m.author) out.setAuthor(m.author); if (m.subject) out.setSubject(m.subject);
   if (m.keywords) out.setKeywords(m.keywords.split(/[,;]\s*/).filter(Boolean)); out.setProducer('Ali PDF'); out.setCreator('Ali PDF'); out.setModificationDate(new Date());
   busy('Saving…'); await tick();
@@ -1498,7 +1712,7 @@ function extractDialog() {
     label: 'Extract', primary: true, onClick: async () => {
       let idx; try { idx = parseRanges(inp.value, S.pages.length).flat(); } catch (e) { toast(e.message, 'err'); return false; }
       const pg = [...new Set(idx)].map(i => S.pages[i]); closeEditor();
-      try { const b = await buildPdf(pg, { label: 'Extracting' }); busy(false); await saveFile(`${baseName()}_pages_${inp.value.replace(/[^\d,-]+/g, '').replace(/,/g, '_')}.pdf`, new Blob([b])); } catch (e) { busy(false); toast('Failed: ' + e.message, 'err'); }
+      try { const b = await buildPdf(pg, { label: 'Extracting' }); busy(false); await saveFile(`${baseName()}_pages_${inp.value.replace(/[^\d,-]+/g, '').replace(/,/g, '_')}.pdf`, new Blob([b])); } catch (e) { busy(false); toast('Failed: ' + e.message, 'err'); return; }
       if (del.checked) deletePages(pg);
     }
   }] });
@@ -1591,10 +1805,19 @@ function compressDialog() {
       try {
         let b = await buildPdf(S.pages, { ...o, label: 'Compressing' });
         if (m !== 'basic' && b.length >= orig) { const basic = await buildPdf(S.pages, { label: 'Compressing' }); if (basic.length < b.length) b = basic; toast('This PDF is already compact — used the lossless option instead', '', 4500); }
-        busy(false); toast(`${fmtBytes(orig)} → ${fmtBytes(b.length)} (${Math.round((1 - b.length / orig) * 100)}% smaller)`, 'ok', 5000); await saveFile(`${baseName()}_compressed.pdf`, new Blob([b])); }
+        busy(false); toast(b.length < orig ? `${fmtBytes(orig)} → ${fmtBytes(b.length)} (${Math.round((1 - b.length / orig) * 100)}% smaller)` : 'This PDF is already as small as it gets', 'ok', 5000); await saveFile(`${baseName()}_compressed.pdf`, new Blob([b])); }
       catch (e) { busy(false); toast('Failed: ' + e.message, 'err'); }
     }
   }] });
+}
+async function printPdf() {
+  closeEditor(); if (!S.pages.length) { toast('Open a PDF first'); return; }
+  let bytes; try { bytes = await buildPdf(S.pages, { label: 'Preparing to print' }); } catch (e) { busy(false); toast('Could not print: ' + (e?.message || e), 'err', 5000); return; } busy(false);
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  document.getElementById('printFrame')?.remove();
+  const f = el('iframe', { id: 'printFrame', style: 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0' });
+  f.onload = () => setTimeout(() => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch { window.open(url, '_blank'); } }, 400);
+  f.src = url; document.body.append(f); setTimeout(() => URL.revokeObjectURL(url), 600000);
 }
 async function flattenSave() {
   closeEditor(); if (!S.pages.length) return toast('Open a PDF first');
@@ -1846,7 +2069,7 @@ function renderInfo() {
   const srcs = [...new Set(S.pages.map(p => p.src))].map(id => S.sources.get(id)); const size = srcs.reduce((s, x) => s + x.bytes.length, 0);
   const ann = S.pages.reduce((s, p) => s + p.annots.length, 0);
   box.innerHTML = `<div class="fld"><span>Pages</span>${S.pages.length}</div><div class="fld"><span>Source files</span>${srcs.map(s => esc(s.name)).join('<br>')} (${fmtBytes(size)})</div><div class="fld"><span>Your edits</span>${ann} item(s)</div>
-    ${srcs.some(s => s.encrypted) ? '<div class="fld"><span>Security</span>Password protected — saved copy will have the password removed.</div>' : ''}
+    ${srcs.some(s => s.encrypted || s.wasLocked) ? '<div class="fld"><span>Security</span>Password protected — saved copy will have the password removed.</div>' : ''}
     ${['title', 'author', 'subject', 'keywords'].map(k => `<label class="fld"><span>${k[0].toUpperCase() + k.slice(1)}</span><input type="text" data-meta="${k}" value="${esc(S.meta[k])}"></label>`).join('')}
     <div class="hint" style="font-size:11.5px;white-space:normal">Document properties are written into the file when you save.</div>`;
 }
@@ -1912,7 +2135,7 @@ const TCATS = [
   ['Convert', '#f59e0b', [['word', 'PDF to Word', '.docx', wordDialog], ['sheet', 'PDF to Excel', '.csv table text', toCSV], ['jpg', 'PDF to JPG', 'Images per page', () => toImages('jpg')], ['image', 'PDF to PNG', 'Lossless images', () => toImages('png')],
     ['txt', 'PDF to Text', '.txt', toText], ['html', 'PDF to HTML', 'Web page', toHTML], ['convert', 'Images to PDF', 'JPG, PNG, WEBP', imagesDialog]]],
   ['Optimize & protect', '#e5484d', [['compress', 'Compress PDF', 'Reduce file size', compressDialog], ['lock', 'Remove password', 'Save an unlocked copy', () => { if (!S.pages.length) return toast('Open the protected PDF first (you’ll be asked for its password)'); savePdf(); }],
-    ['file', 'Flatten PDF', 'Make everything permanent', flattenSave], ['info', 'Properties', 'Title, author…', () => openSideTab('info')]]]
+    ['file', 'Print', 'Ctrl+P', printPdf], ['file', 'Flatten PDF', 'Make everything permanent', flattenSave], ['info', 'Properties', 'Title, author…', () => openSideTab('info')]]]
 ];
 function toolsDialog() {
   const body = el('div'); const fns = [];
@@ -1958,11 +2181,13 @@ window.addEventListener('dragenter', e => { if (dragIds) return; if ([...(e.data
 window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#drop').classList.remove('over'); } });
 window.addEventListener('dragover', e => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
 window.addEventListener('drop', e => { if (dragIds) return; if (e.dataTransfer?.files?.length) { e.preventDefault(); dragDepth = 0; $('#drop').classList.remove('over'); handleFiles(e.dataTransfer.files); } });
+// installed app: "Open with Ali PDF" hands the chosen files over here
+if ('launchQueue' in window) window.launchQueue.setConsumer(async lp => { try { if (!lp.files?.length) return; const files = await Promise.all(lp.files.map(h => h.getFile())); await handleFiles(files, S.pages.length ? undefined : 'new'); } catch (e) { toast('Could not open the file: ' + (e?.message || e), 'err', 5000); } });
 window.addEventListener('beforeunload', e => { if (S.dirty) { e.preventDefault(); e.returnValue = ''; } });
 let rzT = 0; window.addEventListener('resize', () => { clearTimeout(rzT); rzT = setTimeout(() => { if (innerWidth <= 860) { } }, 200); });
 if (innerWidth <= 860) toggleSide(false); else $('#bSide').classList.add('on');
 renderProps(); updUndo();
-window.__appReady = true; $('#loadMsg').innerHTML = 'Edit text · Highlight · Draw · Shapes · Sign · Stamps · Comments · Redact · Whiteout · Forms · Crop · Rotate · Reorder · Merge · Split · Extract · Watermark · Page numbers · Compress · PDF ↔ Word / Excel / JPG / PNG / Text · AI assistant';
+window.__appReady = true; $('#loadMsg').innerHTML = 'Edit text · Highlight · Draw · Shapes · Sign · Stamps · Comments · Redact · Whiteout · Forms · Crop · Rotate · Reorder · Merge · Split · Extract · Watermark · Page numbers · Compress · PDF ↔ Word / Excel / JPG / PNG / Text';
 window.__S = S;
 if (DESKTOP) {
   setInterval(() => { fetch('/__ping').catch(() => { }); }, 5000);
