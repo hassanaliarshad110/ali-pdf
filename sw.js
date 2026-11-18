@@ -1,5 +1,5 @@
 // Ali PDF service worker: caches the app so it opens offline after the first visit.
-const CACHE = 'ali-pdf-v4';
+const CACHE = 'ali-pdf-v5';
 const CORE = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
   'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs',

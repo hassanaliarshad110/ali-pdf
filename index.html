@@ -1088,7 +1088,7 @@ async function textItems(p) {
   for (const it of tc.items) {
     if (!it.str || !it.str.trim()) { if (it.hasEOL && items.length) items[items.length - 1].eol = true; continue; }
     const t = it.transform, h = Math.hypot(t[2], t[3]) || it.height || 10, st = tc.styles[it.fontName] || {};
-    items.push({ str: it.str, x: t[4], y: t[5], w: it.width, h, fam: st.fontFamily || 'sans-serif', rotated: Math.abs(t[1]) > 0.01 || Math.abs(t[2]) > 0.01 || t[3] < 0, eol: it.hasEOL });
+    items.push({ str: it.str, x: t[4], y: t[5], w: it.width, h, fam: st.fontFamily || 'sans-serif', rotated: Math.abs(t[1]) > 0.01 || Math.abs(t[2]) > 0.01 || t[3] < 0, ang: Math.atan2(t[1], t[0]) * 180 / Math.PI, eol: it.hasEOL });
   }
   src.text[p.idx] = items; return items;
 }
@@ -1490,28 +1490,37 @@ async function runSearch() {
   if (q.length >= 1 && S.pages.length) {
     for (const p of S.pages) {
       const items = await textItems(p); if (run !== searchRun) return; if (items.length) anyText = true;
-      // match across the whole line, so a phrase is found even when the PDF stores each word separately
-      for (const L of linesOf(items)) {
-        let str = '', lastEnd = null; const segs = [];
-        for (const it of L.items) {
-          if (lastEnd != null && it.x - lastEnd > L.h * 0.18 && !/\s$/.test(str) && !/^\s/.test(it.str)) str += ' ';
-          segs.push({ a: str.length, it }); str += it.str; lastEnd = it.x + it.w;
-        }
-        const low = str.toLowerCase().replace(/\s/g, ' '); let k = low.indexOf(q);
-        while (k >= 0) {
-          let x0 = Infinity, x1 = -Infinity, bx = null;
-          for (const sg of segs) {
-            const n = sg.it.str.length, from = Math.max(k, sg.a), to = Math.min(k + q.length, sg.a + n); if (to <= from) continue;
-            const cw = sg.it.w / Math.max(1, n); x0 = Math.min(x0, sg.it.x + cw * (from - sg.a)); x1 = Math.max(x1, sg.it.x + cw * (to - sg.a)); bx = bx || itemBox(sg.it);
+      // sideways text (rotated scans, landscape pages) is searched in its own reading direction
+      const groups = new Map(); for (const it of items) { const g = it.rotated ? norm(Math.round((it.ang || 0) / 90) * 90) : 0; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(it); }
+      for (const [g, its] of groups) {
+        const t = g * Math.PI / 180, co = Math.round(Math.cos(t)), si = Math.round(Math.sin(t));
+        const loc = g ? its.map(it => ({ ...it, x: it.x * co + it.y * si, y: -it.x * si + it.y * co, rotated: false })) : its;
+        // match across the whole line, so a phrase is found even when the PDF stores each word separately
+        for (const L of linesOf(loc)) {
+          let str = '', lastEnd = null; const segs = [];
+          for (const it of L.items) {
+            if (lastEnd != null && it.x - lastEnd > L.h * 0.18 && !/\s$/.test(str) && !/^\s/.test(it.str)) str += ' ';
+            segs.push({ a: str.length, it }); str += it.str; lastEnd = it.x + it.w;
           }
-          if (bx) hits.push({ pid: p.id, x: x0, y: bx.y, w: Math.max(2, x1 - x0), h: bx.h });
-          k = low.indexOf(q, k + q.length);
+          const low = str.toLowerCase().replace(/\s/g, ' '); let k = low.indexOf(q);
+          while (k >= 0) {
+            let x0 = Infinity, x1 = -Infinity, bx = null;
+            for (const sg of segs) {
+              const n = sg.it.str.length, from = Math.max(k, sg.a), to = Math.min(k + q.length, sg.a + n); if (to <= from) continue;
+              const cw = sg.it.w / Math.max(1, n); x0 = Math.min(x0, sg.it.x + cw * (from - sg.a)); x1 = Math.max(x1, sg.it.x + cw * (to - sg.a)); bx = bx || itemBox(sg.it);
+            }
+            if (bx) {
+              const w = Math.max(2, x1 - x0), cs = [[x0, bx.y], [x0 + w, bx.y + bx.h]].map(([u, v]) => [u * co - v * si, u * si + v * co]);
+              hits.push({ pid: p.id, x: Math.min(cs[0][0], cs[1][0]), y: Math.min(cs[0][1], cs[1][1]), w: Math.abs(cs[1][0] - cs[0][0]), h: Math.abs(cs[1][1] - cs[0][1]) });
+            }
+            k = low.indexOf(q, k + q.length);
+          }
         }
       }
     }
   }
   S.hits = hits; S.hitIdx = hits.length ? 0 : -1;
-  if (q && S.pages.length && !anyText && noTextFor !== S.pages[0].src) { noTextFor = S.pages[0].src; toast('This PDF is a scan (pictures of pages), so there is no text to search', '', 5000); }
+  if (q && S.pages.length && !anyText && noTextFor !== S.pages[0].src) { noTextFor = S.pages[0].src; toast('This PDF is a scan, so there is no text to search yet. Use All tools ▸ Recognize text (OCR) first.', '', 7000); }
   $('#qCnt').textContent = q ? (S.hits.length ? `${S.hitIdx + 1}/${S.hits.length}` : '0') : '';
   S.pages.forEach(p => drawOverlay(p)); if (S.hits.length) showHit();
 }
@@ -1915,6 +1924,101 @@ function imagesDialog() {
   }] });
 }
 
+/* ============================== OCR (text recognition) ============================== */
+const OCR_LANGS = [['eng', 'English'], ['ara', 'Arabic'], ['eng+ara', 'English + Arabic'], ['urd', 'Urdu'], ['eng+urd', 'English + Urdu'], ['fra', 'French'], ['deu', 'German'], ['spa', 'Spanish'], ['hin', 'Hindi']];
+// tiny invisible font: lets the recognized text be searched and copied in any language without changing how the page looks
+const GLYPHLESS = 'AAEAAAAKAIAAAwAgT1MvMlbeyJQAAAEoAAAAYGNtYXAACgA0AAABkAAAAB5nbHlmFSJBJAAAAbgAAAAYaGVhZAt48WUAAACsAAAANmhoZWEMAgQCAAAA5AAAACRobXR4BAAAAAAAAYgAAAAIbG9jYQAMAAAAAAGwAAAABm1heHAABAAFAAABCAAAACBuYW1l8usW2gAAAdAAAABLcG9zdAABAAEAAAIcAAAAIAABAAAAAQAAsJRxEF8PPPUEBwgAAAAAAM+a/G4AAAAA1MOn8gAAAAAEAAgAAAAAEAACAAAAAAAAAAEAAAgA//8AAAQAAAAAAAQAAAEAAAAAAAAAAAAAAAAAAAACAAEAAAACAAQAAQAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAwAAAZAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAR09PRwBAAAAAAAAB//8AAAABAAGAAAAAAAAAAAAAAAAAAAABAAAAAAAABAAAAAAAAAIAAQAAAAAAFAADAAAAAAAUAAYACgAAAAAAAAAAAAAAAAAMAAAAAQAAAAAEAAgAAAMAADEhESEEAPwACAAAAAADACoAAAADAAAABQAWAAAAAQAAAAAABQALABYAAwABBAkABQAWAAAAVgBlAHIAcwBpAG8AbgAgADEALgAwVmVyc2lvbiAxLjAAAAEAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAA=';
+let ocrEngine = null;
+function loadOcrEngine() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  return ocrEngine ||= new Promise((res, rej) => {
+    const sc = el('script', { src: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js' });
+    sc.onload = () => window.Tesseract ? res(window.Tesseract) : rej(new Error('the text recognition engine did not start'));
+    sc.onerror = () => { ocrEngine = null; sc.remove(); rej(new Error('the text recognition engine could not be downloaded. Check your internet connection and try again')); };
+    document.head.append(sc);
+  });
+}
+function ocrWords(data) {
+  const out = [], add = (w, line) => { const b = w.bbox, lb = (line || w.line)?.bbox || b; if (!w.text?.trim() || !b || (w.confidence ?? 100) < 30 || b.x1 - b.x0 < 2) return; const tall = lb.y1 - lb.y0 > (b.y1 - b.y0) * 3 ? b : lb; out.push({ text: w.text.trim(), x0: b.x0, x1: b.x1, y0: tall.y0, y1: tall.y1 }); };
+  if (data.blocks?.length) { for (const b of data.blocks) for (const pa of b.paragraphs || []) for (const l of pa.lines || []) for (const w of l.words || []) add(w, l); }
+  else for (const w of data.words || []) add(w);
+  return out;
+}
+function ocrFont(d) {
+  const c = d.context, map = new Uint8Array(131072); for (let i = 1; i < map.length; i += 2) map[i] = 1;
+  const cmap = '/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo\n<<\n  /Registry (Adobe)\n  /Ordering (UCS)\n  /Supplement 0\n>> def\n/CMapName /Adobe-Identify-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n1 beginbfrange\n<0000> <FFFF> <0000>\nendbfrange\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n';
+  const file = c.register(c.flateStream(dataUrlToBytes(',' + GLYPHLESS), { Length1: 572 }));
+  const desc = c.register(c.obj({ Type: 'FontDescriptor', FontName: 'GlyphLessFont', Flags: 5, FontBBox: [0, 0, 500, 1000], ItalicAngle: 0, Ascent: 1000, Descent: -1, CapHeight: 1000, StemV: 80, FontFile2: file }));
+  const cid = c.register(c.obj({ Type: 'Font', Subtype: 'CIDFontType2', BaseFont: 'GlyphLessFont', CIDSystemInfo: { Registry: PL.PDFString.of('Adobe'), Ordering: PL.PDFString.of('Identity'), Supplement: 0 }, FontDescriptor: desc, DW: 500, CIDToGIDMap: c.register(c.flateStream(map)) }));
+  return c.register(c.obj({ Type: 'Font', Subtype: 'Type0', BaseFont: 'GlyphLessFont', Encoding: 'Identity-H', DescendantFonts: [cid], ToUnicode: c.register(c.flateStream(cmap)) }));
+}
+function ocrDialog() {
+  if (!S.pages.length) return toast('Open a PDF first');
+  const cur = LS.get('ocrLang', 'eng');
+  const body = el('div', { html: `<span class="lbl">Language of the document</span><select class="inp" id="oL">${OCR_LANGS.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <span class="lbl">Pages (e.g. 1-3, 5, 8-end)</span><input class="inp" id="oR" value="1-end">
+    <div class="hint" style="margin-top:8px">Reads the text in scanned pages and photos so you can search it, copy it, edit it and convert it to Word, Excel or Text. The page keeps its look.<br><br>Runs on your device: your file is not uploaded. The reading engine and language data download the first time (about 5–15 MB), so that first run needs internet. Rotate sideways pages upright first for best results.</div>` });
+  modal({ title: 'Recognize text (OCR)', body, actions: [{ label: 'Cancel' }, {
+    label: 'Recognize text', primary: true, onClick: () => {
+      let idx; try { idx = [...new Set(parseRanges(body.querySelector('#oR').value, S.pages.length).flat())].sort((a, b) => a - b); } catch (e) { toast(e.message, 'err'); return false; }
+      if (!idx.length) { toast('Choose at least one page', 'err'); return false; }
+      const lang = body.querySelector('#oL').value; LS.set('ocrLang', lang); runOcr(lang, idx.map(i => S.pages[i]));
+    }
+  }] });
+}
+async function runOcr(lang, pages) {
+  closeEditor(); let worker = null, skipped = 0, nWords = 0, nPages = 0;
+  try {
+    const jobs = new Map();   // one job per source page, even if it appears twice in the document
+    for (const p of pages) { const src = srcOf(p); if (src.encrypted || src.libFail) { skipped++; continue; } if (!jobs.has(p.src + ':' + p.idx)) jobs.set(p.src + ':' + p.idx, p); }
+    if (!jobs.size) { toast('These pages cannot take a text layer', 'err', 5000); return; }
+    busy('Loading the text recognition engine…');
+    const T = await loadOcrEngine(); let k = 0; const n = jobs.size;
+    worker = await T.createWorker(lang.split('+'), 1, { logger: m => { if (m.status === 'recognizing text') busy(`Reading page ${k}/${n}… ${Math.round((m.progress || 0) * 100)}%`); else if (/load|initializ/.test(m.status || '')) busy(k ? `Reading page ${k}/${n}…` : 'Getting language data (first time only)…'); } });
+    const found = new Map();
+    for (const p of jobs.values()) {
+      k++; busy(`Reading page ${k}/${n}…`); await tick();
+      const proxy = await proxyOf(p), one = proxy.getViewport({ scale: 1, rotation: totalRot(proxy, p) });
+      const scale = Math.min(300 / 72, Math.sqrt(12e6 / (one.width * one.height))), vp = proxy.getViewport({ scale, rotation: totalRot(proxy, p) });
+      const c = el('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height); const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+      await proxy.render({ canvasContext: x, viewport: vp }).promise;
+      const { data } = await worker.recognize(await canvasBlob(c, 'image/png'), {}, { blocks: true });
+      const have = (await textItems(p)).map(itemBox), words = [];
+      for (const w of ocrWords(data)) {
+        const size = (w.y1 - w.y0) / 1.12, yb = w.y1 - size * 0.22, [ax, ay] = vp.convertToPdfPoint(w.x0, yb), [bx, by] = vp.convertToPdfPoint(w.x1, yb), [mx, my] = vp.convertToPdfPoint((w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2);
+        if (have.some(b => mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h)) continue;   // real text is already there
+        words.push({ text: w.text, ax, ay, bx, by, size: size / scale });
+      }
+      if (words.length) { if (!found.has(p.src)) found.set(p.src, new Map()); found.get(p.src).set(p.idx, words); nWords += words.length; nPages++; }
+    }
+    try { await worker.terminate(); } catch { } worker = null;
+    if (!nWords) { busy(false); toast('No new text was found on those pages', '', 5000); return; }
+    busy('Adding the text layer…'); await tick();
+    for (const [sid, byPage] of found) {
+      const src = S.sources.get(sid), d = await PL.PDFDocument.load(src.bytes, { ignoreEncryption: true, updateMetadata: false }), font = ocrFont(d), dp = d.getPages();
+      for (const [idx, words] of byPage) {
+        const page = dp[idx], name = page.node.newFontDictionary('OCR', font), ops = [PL.pushGraphicsState(), PL.beginText(), PL.setTextRenderingMode(PL.TextRenderingMode.Invisible)];
+        for (const w of words) {
+          const len = Math.hypot(w.bx - w.ax, w.by - w.ay), th = Math.atan2(w.by - w.ay, w.bx - w.ax), co = Math.cos(th), si = Math.sin(th), size = Math.max(1, w.size);
+          let hex = ''; for (const ch of w.text + ' ') hex += ch.split('').map(u => u.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+          ops.push(PL.setFontAndSize(name, r2(size)), PL.PDFOperator.of(PL.PDFOperatorNames.SetTextHorizontalScaling, [PL.PDFNumber.of(r2(clamp(100 * len / (w.text.length * 0.5 * size), 1, 1000)))]), PL.setTextMatrix(co, si, -si, co, r2(w.ax), r2(w.ay)), PL.showText(PL.PDFHexString.of(hex)));
+        }
+        ops.push(PL.endText(), PL.popGraphicsState()); page.pushOperators(...ops);
+      }
+      const bytes = await d.save({ updateFieldAppearances: false });
+      src.bytes = bytes; try { src.doc.destroy(); } catch { }
+      const r = await openPdfjs(bytes, src.name, src.pw); src.doc = r.doc; src.proxies = []; src.text = []; src.ver++;
+      const ps = S.pages.filter(q => q.src === sid); for (const q of ps) { const te = TE.get(q.id); if (te) te.key = ''; }
+      await Promise.all(ps.map(q => layoutPage(q)));
+    }
+    S.dirty = true; noTextFor = null; busy(false);
+    toast(`Found ${nWords} words on ${nPages} page${nPages > 1 ? 's' : ''}. You can now search, edit and convert this text. Save to keep it.`, 'ok', 7000);
+    if (skipped) toast(skipped + ' protected page(s) were skipped', '', 4000);
+    if ($('#q').value.trim()) runSearch();
+  } catch (e) { busy(false); console.error(e); toast('Text recognition failed: ' + (e?.message || e), 'err', 7000); }
+  finally { if (worker) try { await worker.terminate(); } catch { } }
+}
+
 /* ============================== signature / stamp / image ============================== */
 function trimCanvas(c) {
   const x = c.getContext('2d'), d = x.getImageData(0, 0, c.width, c.height).data; let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
@@ -2133,7 +2237,7 @@ const TCATS = [
     ['whiteout', 'Whiteout', 'Hide content', () => setTool('whiteout')], ['redact', 'Redact', 'Permanently black out', () => setTool('redact')], ['drop', 'Watermark', 'Text over every page', watermarkDialog], ['hash', 'Page numbers', 'Header & footer', headerFooterDialog]]],
   ['Sign & forms', '#15a362', [['sign', 'Sign', 'Draw, type or upload', signDialog], ['stamp', 'Stamps', 'Approved, Paid, Draft…', stampDialog], ['form', 'Fill form', 'Fillable fields', () => openSideTab('forms')], ['date', 'Add date', "Today's date", () => { setTool('text'); S.pending = { kind: 'text', text: new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) }; document.body.classList.add('placing'); renderProps(); }]]],
   ['Convert', '#f59e0b', [['word', 'PDF to Word', '.docx', wordDialog], ['sheet', 'PDF to Excel', '.csv table text', toCSV], ['jpg', 'PDF to JPG', 'Images per page', () => toImages('jpg')], ['image', 'PDF to PNG', 'Lossless images', () => toImages('png')],
-    ['txt', 'PDF to Text', '.txt', toText], ['html', 'PDF to HTML', 'Web page', toHTML], ['convert', 'Images to PDF', 'JPG, PNG, WEBP', imagesDialog]]],
+    ['search', 'Recognize text (OCR)', 'Make scans searchable', ocrDialog], ['txt', 'PDF to Text', '.txt', toText], ['html', 'PDF to HTML', 'Web page', toHTML], ['convert', 'Images to PDF', 'JPG, PNG, WEBP', imagesDialog]]],
   ['Optimize & protect', '#e5484d', [['compress', 'Compress PDF', 'Reduce file size', compressDialog], ['lock', 'Remove password', 'Save an unlocked copy', () => { if (!S.pages.length) return toast('Open the protected PDF first (you’ll be asked for its password)'); savePdf(); }],
     ['file', 'Print', 'Ctrl+P', printPdf], ['file', 'Flatten PDF', 'Make everything permanent', flattenSave], ['info', 'Properties', 'Title, author…', () => openSideTab('info')]]]
 ];
@@ -2187,7 +2291,7 @@ window.addEventListener('beforeunload', e => { if (S.dirty) { e.preventDefault()
 let rzT = 0; window.addEventListener('resize', () => { clearTimeout(rzT); rzT = setTimeout(() => { if (innerWidth <= 860) { } }, 200); });
 if (innerWidth <= 860) toggleSide(false); else $('#bSide').classList.add('on');
 renderProps(); updUndo();
-window.__appReady = true; $('#loadMsg').innerHTML = 'Edit text · Highlight · Draw · Shapes · Sign · Stamps · Comments · Redact · Whiteout · Forms · Crop · Rotate · Reorder · Merge · Split · Extract · Watermark · Page numbers · Compress · PDF ↔ Word / Excel / JPG / PNG / Text';
+window.__appReady = true; $('#loadMsg').innerHTML = 'Edit text · Highlight · Draw · Shapes · Sign · Stamps · Comments · Redact · Whiteout · Forms · Crop · Rotate · Reorder · Merge · Split · Extract · Watermark · Page numbers · Compress · PDF ↔ Word / Excel / JPG / PNG / Text · OCR for scans';
 window.__S = S;
 if (DESKTOP) {
   setInterval(() => { fetch('/__ping').catch(() => { }); }, 5000);
