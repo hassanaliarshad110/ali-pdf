@@ -312,7 +312,10 @@ import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legac
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs';
 const PL = window.PDFLib;
 const DESKTOP = window.__DESKTOP === true;
-const PDFOPTS = DESKTOP ? { cMapUrl: '/lib/cmaps/', cMapPacked: true, standardFontDataUrl: '/lib/standard_fonts/', wasmUrl: '/lib/wasm/', iccUrl: '/lib/iccs/' } : {};
+// The engine needs its decoders (scanned pages: JPEG2000/JBIG2), font data and character maps,
+// otherwise scanned text and some fonts render blank.
+const PDFJS_BASE = DESKTOP ? '/lib/' : 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/';
+const PDFOPTS = { cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true, standardFontDataUrl: PDFJS_BASE + 'standard_fonts/', wasmUrl: PDFJS_BASE + 'wasm/', iccUrl: PDFJS_BASE + 'iccs/' };
 
 /* ============================== helpers ============================== */
 const $ = (s, r = document) => r.querySelector(s);

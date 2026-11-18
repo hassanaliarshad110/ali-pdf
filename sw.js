@@ -1,9 +1,12 @@
 // Ali PDF service worker: caches the app so it opens offline after the first visit.
-const CACHE = 'ali-pdf-v1';
+const CACHE = 'ali-pdf-v2';
 const CORE = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
   'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs',
-  'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs'];
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs',
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/wasm/openjpeg.wasm',
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/wasm/jbig2.wasm',
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/wasm/qcms_bg.wasm'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => Promise.all(CORE.map(u => c.add(u).catch(() => {})))).then(() => self.skipWaiting()));
 });
