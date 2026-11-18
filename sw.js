@@ -1,5 +1,5 @@
 // Ali PDF service worker: caches the app so it opens offline after the first visit.
-const CACHE = 'ali-pdf-v2';
+const CACHE = 'ali-pdf-v3';
 const CORE = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
   'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs',
@@ -19,7 +19,7 @@ self.addEventListener('fetch', e => {
   const local = new URL(r.url).origin === location.origin;
   if (local && r.mode === 'navigate') {
     // network first for the app page so updates arrive, cache as fallback
-    e.respondWith(fetch(r).then(res => { const c = res.clone(); caches.open(CACHE).then(x => x.put(r, c)); return res; })
+    e.respondWith(fetch(r, { cache: 'no-cache' }).then(res => { const c = res.clone(); caches.open(CACHE).then(x => x.put(r, c)); return res; })
       .catch(() => caches.match(r).then(m => m || caches.match('./index.html'))));
     return;
   }

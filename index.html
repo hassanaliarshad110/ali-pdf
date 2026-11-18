@@ -1975,6 +1975,6 @@ addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;
 bI.addEventListener('click',async()=>{if(!deferredInstall)return;deferredInstall.prompt();await deferredInstall.userChoice;deferredInstall=null;bI.hidden=true;});
 addEventListener('appinstalled',()=>{bI.hidden=true;});
 </script>
-<script>if('serviceWorker' in navigator && location.protocol==='https:'){addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));}</script>
+<script>if('serviceWorker' in navigator && location.protocol==='https:'){addEventListener('load',()=>navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).catch(()=>{}));}</script>
 </body>
 </html>
