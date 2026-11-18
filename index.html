@@ -75,7 +75,7 @@ input,select,textarea{font:inherit;color:var(--ink)}
 .sw input[type=color]{width:26px;height:26px;border:0;background:none;padding:0;cursor:pointer}
 .tg{height:30px;min-width:30px;border:1px solid var(--line);background:var(--panel);border-radius:7px;cursor:pointer;font-weight:700}
 .tg.on{background:var(--acc2);border-color:var(--acc);color:var(--acc)}
-.hint{color:var(--mut);white-space:nowrap}
+.hint{color:var(--mut);white-space:nowrap}.md .hint{white-space:normal}
 /* main */
 #main{flex:1;display:flex;min-height:0;position:relative}
 #side{width:228px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;flex:none;z-index:15}
@@ -1957,7 +1957,7 @@ function ocrDialog() {
   const cur = LS.get('ocrLang', 'eng');
   const body = el('div', { html: `<span class="lbl">Language of the document</span><select class="inp" id="oL">${OCR_LANGS.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('')}</select>
     <span class="lbl">Pages (e.g. 1-3, 5, 8-end)</span><input class="inp" id="oR" value="1-end">
-    <div class="hint" style="margin-top:8px">Reads the text in scanned pages and photos so you can search it, copy it, edit it and convert it to Word, Excel or Text. The page keeps its look.<br><br>Runs on your device: your file is not uploaded. The reading engine and language data download the first time (about 5–15 MB), so that first run needs internet. Rotate sideways pages upright first for best results.</div>` });
+    <div class="hint" style="margin-top:8px;white-space:normal;line-height:1.45">Reads the text in scanned pages and photos so you can search it, copy it, edit it and convert it to Word, Excel or Text. The page keeps its look.<br><br>Runs on your device: your file is not uploaded. The reading engine and language data download the first time (about 5–15 MB), so that first run needs internet. Rotate sideways pages upright first for best results.</div>` });
   modal({ title: 'Recognize text (OCR)', body, actions: [{ label: 'Cancel' }, {
     label: 'Recognize text', primary: true, onClick: () => {
       let idx; try { idx = [...new Set(parseRanges(body.querySelector('#oR').value, S.pages.length).flat())].sort((a, b) => a - b); } catch (e) { toast(e.message, 'err'); return false; }
